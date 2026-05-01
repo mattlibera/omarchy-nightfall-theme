@@ -11,7 +11,8 @@ import random
 import os
 
 W, H = 5120, 1440
-OUT = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(SCRIPT_DIR, "..", "backgrounds")
 
 def hex_rgb(h):
     h = h.lstrip("#")
@@ -65,40 +66,55 @@ def blend(base, color, mask, strength=1.0):
 def make_nebula(seed=42):
     print("generating: nightfall-nebula.png")
     rng = np.random.default_rng(seed)
-    canvas = blank(BG).astype(np.float32)
+    canvas = np.full((H, W, 3), BG, dtype=np.float32)
 
-    colors = [PURPLE, CYAN, TEAL, BLUE, RED, PEACH, LAVENDER]
-    configs = [
-        # (scale, sigma, strength, x_bias, y_bias)
-        (8,  320, 0.55, 0.15, 0.5),
-        (6,  280, 0.45, 0.75, 0.4),
-        (10, 400, 0.35, 0.45, 0.6),
-        (7,  250, 0.40, 0.30, 0.3),
-        (9,  350, 0.30, 0.85, 0.65),
-        (5,  200, 0.25, 0.60, 0.5),
-        (12, 500, 0.20, 0.10, 0.7),
+    xs = np.linspace(0, 1, W)
+    ys = np.linspace(0, 1, H)
+    xx, yy = np.meshgrid(xs, ys)
+
+    # Each color: list of (cx, cy, sigma) blob centers + overall alpha strength.
+    # Blobs are wide enough to overlap so colors mix at boundaries.
+    # sigma is in pixels — large enough to feel cosmic, not like a smudge.
+    blob_specs = [
+        (PURPLE,   [(0.08, 0.50, 210), (0.20, 0.30, 155), (0.14, 0.72, 130)], 0.75),
+        (CYAN,     [(0.72, 0.47, 230), (0.60, 0.68, 160), (0.83, 0.28, 125)], 0.70),
+        (BLUE,     [(0.44, 0.38, 195), (0.58, 0.58, 155)],                     0.55),
+        (TEAL,     [(0.33, 0.62, 175), (0.48, 0.28, 135)],                     0.60),
+        (RED,      [(0.24, 0.52, 155), (0.37, 0.72, 115)],                     0.50),
+        (PEACH,    [(0.89, 0.44, 175), (0.76, 0.67, 125)],                     0.45),
+        (LAVENDER, [(0.52, 0.60, 165), (0.40, 0.45, 110)],                     0.40),
     ]
 
-    for i, (color, (scale, sigma, strength, xb, yb)) in enumerate(zip(colors, configs)):
-        noise = smooth_noise(H, W, scale, seed=seed + i)
-        # bias towards a region to spread blobs across the panoramic canvas
-        xs = np.linspace(0, 1, W)
-        ys = np.linspace(0, 1, H)
-        xx, yy = np.meshgrid(xs, ys)
-        dist = np.exp(-((xx - xb)**2 * 3 + (yy - yb)**2 * 6))
-        mask = gaussian_filter(noise * dist, sigma=sigma)
-        mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8)
-        mask = np.power(mask, 1.8)
-        canvas = blend(canvas, color, mask, strength)
+    for si, (color, blobs, strength) in enumerate(blob_specs):
+        layer = np.zeros((H, W), dtype=np.float32)
 
-    # subtle vignette
-    xs = np.linspace(-1, 1, W)
-    ys = np.linspace(-1, 1, H)
-    xx, yy = np.meshgrid(xs, ys)
-    vignette = 1 - np.clip(xx**2 * 0.3 + yy**2 * 0.8, 0, 1) * 0.6
+        # Two noise octaves used to texture every blob for this color.
+        coarse_tex = smooth_noise(H, W, 18, seed=seed + si * 5)
+        fine_tex   = smooth_noise(H, W,  5, seed=seed + si * 5 + 1)
+        texture    = coarse_tex * 0.65 + fine_tex * 0.35
+
+        for bx, by, sigma in blobs:
+            point = np.zeros((H, W), dtype=np.float32)
+            point[int(by * H), int(bx * W)] = 1.0
+            blob = gaussian_filter(point, sigma=sigma)
+            blob /= blob.max() + 1e-8
+            # fractal texture shreds the smooth circle into wispy organic edges
+            blob = blob * (0.45 + texture * 0.55)
+            layer = np.maximum(layer, blob)
+
+        layer = (layer - layer.min()) / (layer.max() - layer.min() + 1e-8)
+        layer = np.power(layer, 1.5)
+
+        c = np.array(color, dtype=np.float32)
+        m = (layer * strength)[:, :, np.newaxis]
+        canvas = canvas * (1 - m) + c * m
+
+    canvas = np.clip(canvas, 0, 255)
+
+    vignette = 1 - np.clip(xx ** 2 * 0.20 + yy ** 2 * 0.65, 0, 1) * 0.45
     canvas *= vignette[:, :, np.newaxis]
 
-    save(canvas, "nightfall-nebula.png")
+    save(canvas, "1-nightfall-nebula.png")
 
 
 # ── Wallpaper 2: Flow Field ────────────────────────────────────────────────────
@@ -108,52 +124,45 @@ def make_flow(seed=7):
     print("generating: nightfall-flow.png")
     rng = np.random.default_rng(seed)
 
-    canvas = np.zeros((H, W, 3), dtype=np.float32)
-    bg = np.array(BG, dtype=np.float32)
-    canvas[:] = bg
+    img = Image.new("RGBA", (W, H), (*BG, 255))
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    # build angle field from two noise layers
-    nx = smooth_noise(H, W, 6, seed=seed)
-    ny = smooth_noise(H, W, 6, seed=seed + 1)
-    angle_field = (nx - 0.5) * 2 * np.pi * 2 + (ny - 0.5) * np.pi
+    # Very coarse noise (scale=40) so features span hundreds of pixels —
+    # particles sweep in long graceful arcs rather than tight spirals.
+    nx = smooth_noise(H, W, 40, seed=seed)
+    # Dominant direction: roughly left-to-right with gentle vertical drift.
+    # Noise perturbs by at most ±60° so lines always feel purposeful.
+    base_angle = np.pi * 0.05
+    angle_field = base_angle + (nx - 0.5) * np.pi * 1.2
 
     line_colors = [PURPLE, CYAN, TEAL, BLUE, PEACH, LAVENDER, MUTED, RED, GOLD]
-    n_particles = 12000
-    step = 2.5
-    steps = 280
-
-    # alpha accumulation layer
-    acc = np.zeros((H, W, 3), dtype=np.float32)
-    wt  = np.zeros((H, W),    dtype=np.float32)
+    n_particles = 2200
+    step = 2.0
+    steps = 900  # long paths so each line sweeps across the canvas
 
     for _ in range(n_particles):
-        x = rng.uniform(0, W)
+        # seed particles from the left third so they sweep across the image
+        x = rng.uniform(-W * 0.1, W * 0.5)
         y = rng.uniform(0, H)
-        color = np.array(rng.choice(line_colors), dtype=np.float32)
-        alpha = rng.uniform(0.03, 0.12)
+        color = tuple(rng.choice(line_colors))
+        alpha = int(rng.uniform(22, 60))
+        rgba = (*color, alpha)
 
+        path = []
         for _ in range(steps):
             ix = int(np.clip(x, 0, W - 1))
             iy = int(np.clip(y, 0, H - 1))
+            path.append((float(x), float(y)))
             a = angle_field[iy, ix]
-            acc[iy, ix] += color * alpha
-            wt[iy, ix]  += alpha
             x += np.cos(a) * step
             y += np.sin(a) * step
             if x < 0 or x >= W or y < 0 or y >= H:
                 break
 
-    # composite: where weight > 0, blend over background
-    mask = np.clip(wt / (wt.max() + 1e-8), 0, 1)
-    safe_wt = np.where(wt > 0, wt, 1)[:, :, np.newaxis]
-    colors_norm = acc / safe_wt
-    m = np.clip(mask * 2.5, 0, 1)[:, :, np.newaxis]
-    canvas = bg * (1 - m) + colors_norm * m
+        if len(path) > 1:
+            draw.line(path, fill=rgba, width=1)
 
-    # blur very slightly to anti-alias
-    pil = Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8))
-    pil = pil.filter(ImageFilter.GaussianBlur(radius=0.8))
-    canvas = np.array(pil, dtype=np.float32)
+    canvas = np.array(img.convert("RGB"), dtype=np.float32)
 
     # vignette
     xs = np.linspace(-1, 1, W)
@@ -162,7 +171,7 @@ def make_flow(seed=7):
     vignette = 1 - np.clip(xx**2 * 0.2 + yy**2 * 0.7, 0, 1) * 0.5
     canvas *= vignette[:, :, np.newaxis]
 
-    save(canvas, "nightfall-flow.png")
+    save(canvas, "2-nightfall-flow.png")
 
 
 # ── Wallpaper 3: Geometry ──────────────────────────────────────────────────────
@@ -231,7 +240,7 @@ def make_geometry(seed=13):
 
     img = Image.alpha_composite(img_rgba, overlay).convert("RGB")
 
-    path = os.path.join(OUT, "nightfall-geometry.png")
+    path = os.path.join(OUT, "3-nightfall-geometry.png")
     img.save(path)
     print(f"  saved {path}")
 
