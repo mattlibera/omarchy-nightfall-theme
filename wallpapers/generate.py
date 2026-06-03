@@ -6,7 +6,6 @@ Requires: python-numpy python-pillow python-scipy
 
 import numpy as np
 from PIL import Image, ImageFilter, ImageDraw
-from scipy.ndimage import gaussian_filter
 import random
 import os
 
@@ -64,6 +63,7 @@ def blend(base, color, mask, strength=1.0):
 # Soft gaussian noise blobs in accent colors over the dark background.
 
 def make_nebula(seed=42):
+    from scipy.ndimage import gaussian_filter
     print("generating: nightfall-nebula.png")
     rng = np.random.default_rng(seed)
     canvas = np.full((H, W, 3), BG, dtype=np.float32)
@@ -245,6 +245,213 @@ def make_geometry(seed=13):
     print(f"  saved {path}")
 
 
+# ── Wallpaper 4: Aurora ────────────────────────────────────────────────────────
+# Wavy horizontal ribbons of cool light drifting across a dark sky. Bands are
+# additively blended so overlaps brighten, the way real aurora does.
+
+def make_aurora(seed=99):
+    print("generating: nightfall-aurora.png")
+    rng = np.random.default_rng(seed)
+    bg_arr = np.array(BG, dtype=np.float32)
+    canvas = np.full((H, W, 3), BG, dtype=np.float32)
+
+    # fixed band positions so ribbons don't pile up in the same vertical zone
+    band_specs = [
+        (TEAL,     0.20),
+        (PURPLE,   0.38),
+        (CYAN,     0.50),
+        (LAVENDER, 0.62),
+        (BLUE,     0.78),
+    ]
+    ys = np.arange(H, dtype=np.float32)[:, np.newaxis]
+
+    for i, (color, y_rel) in enumerate(band_specs):
+        # smooth 1D noise gives each band a wobbling centerline along x
+        wob = smooth_noise(64, W, scale=80, seed=seed + i * 7)[32]
+        base_y = H * y_rel
+        amplitude = rng.uniform(35, 70)
+        centerline = base_y + (wob - 0.5) * 2 * amplitude
+
+        dist = ys - centerline[np.newaxis, :]
+
+        # halo: wide soft glow gives the ribbon its atmosphere
+        halo_sigma = rng.uniform(70, 110)
+        halo = np.exp(-(dist ** 2) / (2 * halo_sigma ** 2))
+        halo_mod = smooth_noise(H, W, 90, seed=seed + i * 11 + 3)
+        halo = halo * (0.85 + halo_mod * 0.20)
+
+        # core: narrow bright ribbon gives the band its definition
+        core_sigma = rng.uniform(14, 22)
+        core = np.exp(-(dist ** 2) / (2 * core_sigma ** 2))
+
+        # vertical striations — gentle stripes along the ribbon, like aurora rays
+        rays_n = smooth_noise(32, W, scale=12, seed=seed + i * 23 + 5)[16]
+        rays = 0.75 + (rays_n - 0.5) * 0.50  # ~0.5–1.0 multiplier
+        core = core * rays
+
+        band = np.clip(halo * 0.45 + core * 0.90, 0, 1)
+
+        strength = rng.uniform(0.85, 1.0)
+        c = np.array(color, dtype=np.float32)
+        m = np.clip(band * strength, 0, 1)[:, :, np.newaxis]
+        canvas = canvas + (c - bg_arr) * m
+
+    canvas = np.clip(canvas, 0, 255)
+
+    xs_v = np.linspace(-1, 1, W)
+    ys_v = np.linspace(-1, 1, H)
+    xx, yy = np.meshgrid(xs_v, ys_v)
+    vignette = 1 - np.clip(xx ** 2 * 0.15 + yy ** 2 * 0.50, 0, 1) * 0.40
+    canvas *= vignette[:, :, np.newaxis]
+
+    save(canvas, "4-nightfall-aurora.png")
+
+
+# ── Wallpaper 5: Starfield ─────────────────────────────────────────────────────
+# Deep-space scene: sparse star field, a few nebula cores, a faint milky way.
+
+def make_starfield(seed=21):
+    print("generating: nightfall-starfield.png")
+    rng = np.random.default_rng(seed)
+
+    # darker than BG for actual deep-space vibe
+    deep = np.array([10, 11, 16], dtype=np.float32)
+    canvas = np.zeros((H, W, 3), dtype=np.float32) + deep
+
+    xs = np.arange(W, dtype=np.float32)[np.newaxis, :]
+    ys = np.arange(H, dtype=np.float32)[:, np.newaxis]
+
+    # nebula cores via analytical 2D gaussian (no scipy dependency)
+    cores = [
+        (PURPLE,   0.18, 0.42, 320, 0.60),
+        (CYAN,     0.55, 0.55, 280, 0.50),
+        (TEAL,     0.78, 0.32, 230, 0.45),
+        (RED,      0.42, 0.70, 180, 0.30),
+    ]
+    for color, cx_r, cy_r, sigma, strength in cores:
+        cx, cy = cx_r * W, cy_r * H
+        dist_sq = (xs - cx) ** 2 + (ys - cy) ** 2
+        blob = np.exp(-dist_sq / (2 * sigma ** 2))
+        tex = smooth_noise(H, W, 18, seed=seed + int(cx_r * 1000))
+        blob = blob * (0.50 + tex * 0.65)
+        c = np.array(color, dtype=np.float32)
+        m = (blob * strength)[:, :, np.newaxis]
+        canvas = canvas + (c - deep) * m
+
+    # faint milky way streak — a soft diagonal brightening
+    xx_n = np.linspace(0, 1, W)
+    yy_n = np.linspace(0, 1, H)
+    XX, YY = np.meshgrid(xx_n, yy_n)
+    diag = YY - 0.5 - (XX - 0.5) * 0.20
+    streak = np.exp(-(diag ** 2) / (2 * 0.09 ** 2))
+    streak_tex = smooth_noise(H, W, 25, seed=seed + 77)
+    streak = streak * (0.35 + streak_tex * 0.85) * 0.22
+    streak_color = np.array(LAVENDER, dtype=np.float32)
+    canvas = canvas + (streak_color - deep) * streak[:, :, np.newaxis]
+
+    canvas = np.clip(canvas, 0, 255)
+
+    img = Image.fromarray(canvas.astype(np.uint8))
+    draw = ImageDraw.Draw(img)
+
+    star_palette = [
+        (255, 255, 255), (240, 240, 255), (220, 230, 255),
+        LAVENDER, GOLD, YELLOW, CYAN,
+    ]
+
+    # dense field of small stars — power-law size distribution (mostly tiny)
+    for _ in range(5000):
+        x = int(rng.integers(0, W))
+        y = int(rng.integers(0, H))
+        r = rng.random() ** 6 * 3.0 + 0.4
+        brightness = rng.uniform(0.5, 1.0)
+        color = star_palette[int(rng.integers(0, len(star_palette)))]
+        c = tuple(int(ch * brightness) for ch in color)
+        if r < 1.0:
+            draw.point((x, y), fill=c)
+        else:
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=c)
+
+    # a sprinkling of bigger highlight stars
+    for _ in range(120):
+        x = int(rng.integers(0, W))
+        y = int(rng.integers(0, H))
+        r = rng.uniform(2.0, 4.5)
+        color = star_palette[int(rng.integers(0, len(star_palette)))]
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+    canvas = np.array(img, dtype=np.float32)
+    save(canvas, "5-nightfall-starfield.png")
+
+
+# ── Wallpaper 6: Topographic ───────────────────────────────────────────────────
+# Contour lines from a multi-octave noise heightmap, colored by elevation.
+
+def make_topographic(seed=31):
+    print("generating: nightfall-topographic.png")
+
+    n1 = smooth_noise(H, W, 200, seed=seed)
+    n2 = smooth_noise(H, W, 80,  seed=seed + 1)
+    heightmap = n1 * 0.72 + n2 * 0.28
+    heightmap = (heightmap - heightmap.min()) / (heightmap.max() - heightmap.min() + 1e-8)
+
+    # subtle background gradient BG → BG_ALT driven by elevation
+    bg_arr  = np.array(BG,     dtype=np.float32)
+    alt_arr = np.array(BG_ALT, dtype=np.float32)
+    h3 = heightmap[:, :, np.newaxis]
+    canvas = bg_arr * (1 - h3 * 0.8) + alt_arr * (h3 * 0.8)
+
+    # quantize into bands, then mark pixels where neighbors are on a different band
+    n_levels = 16
+    quantized = np.floor(heightmap * n_levels).astype(np.int32)
+    edge_x = np.zeros_like(quantized, dtype=bool)
+    edge_y = np.zeros_like(quantized, dtype=bool)
+    edge_x[:, :-1] = quantized[:, :-1] != quantized[:, 1:]
+    edge_y[:-1, :] = quantized[:-1, :] != quantized[1:, :]
+    edges = edge_x | edge_y
+
+    accents = [PURPLE, BLUE, CYAN, TEAL, LAVENDER, PEACH, GOLD]
+    for lvl in range(n_levels):
+        mask = edges & (quantized == lvl)
+        if not mask.any():
+            continue
+        color = np.array(accents[lvl % len(accents)], dtype=np.float32)
+        # taper so high elevations sit a bit brighter than low ones
+        brightness = 0.75 + 0.25 * (lvl / max(n_levels - 1, 1))
+        canvas[mask] = color * brightness
+
+    save(canvas, "6-nightfall-topographic.png")
+
+
+# ── Wallpaper 7: Mesh ──────────────────────────────────────────────────────────
+# Minimal mesh gradient — a handful of huge soft gaussians, no texture, no noise.
+
+def make_mesh(seed=53):
+    print("generating: nightfall-mesh.png")
+
+    canvas = np.full((H, W, 3), BG, dtype=np.float32)
+    xs = np.arange(W, dtype=np.float32)[np.newaxis, :]
+    ys = np.arange(H, dtype=np.float32)[:, np.newaxis]
+
+    blobs = [
+        (PURPLE,   0.15, 0.30, 620, 0.85),
+        (BLUE,     0.40, 0.70, 580, 0.75),
+        (TEAL,     0.65, 0.35, 560, 0.70),
+        (PEACH,    0.88, 0.65, 520, 0.60),
+        (LAVENDER, 0.50, 0.15, 460, 0.55),
+    ]
+
+    for color, cx_r, cy_r, sigma, strength in blobs:
+        cx, cy = cx_r * W, cy_r * H
+        dist_sq = (xs - cx) ** 2 + (ys - cy) ** 2
+        blob = np.exp(-dist_sq / (2 * sigma ** 2))
+        c = np.array(color, dtype=np.float32)
+        m = (blob * strength)[:, :, np.newaxis]
+        canvas = canvas * (1 - m) + c * m
+
+    save(canvas, "7-nightfall-mesh.png")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -252,4 +459,8 @@ if __name__ == "__main__":
     make_nebula()
     make_flow()
     make_geometry()
+    make_aurora()
+    make_starfield()
+    make_topographic()
+    make_mesh()
     print("done.")
