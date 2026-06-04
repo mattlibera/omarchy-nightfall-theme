@@ -20,7 +20,15 @@ Originally a JetBrains theme by [@coeiico](https://github.com/coeiico/jetbrains-
 
 ## Screenshots
 
-_Coming soon._
+<p align="center">
+  <img src="images/desktop.png" alt="Nightfall desktop" />
+</p>
+
+| **Neovim** | **btop** |
+| :---: | :---: |
+| <img src="images/neovim.png" alt="Neovim" /> | <img src="images/btop.png" alt="btop" /> |
+| **Lazygit** | **Fastfetch** |
+| <img src="images/lazygit.png" alt="Lazygit" /> | <img src="images/fastfetch.png" alt="Fastfetch" /> |
 
 ## Install
 
